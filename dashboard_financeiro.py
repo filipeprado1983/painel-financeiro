@@ -89,7 +89,7 @@ if st.sidebar.button("🔄 Forçar Atualização Agora"):
 # --- PERSISTÊNCIA DE TOKEN VIA URL ---
 # Tenta pegar da URL primeiro
 query_params = st.query_params
-url_token = query_params.get("token", "")
+url_token = query_params.get("token", "7f-z3i1jYgura6oQBDKdeDxu2jBMqwAH2jFRjbGd2JJz9CBUWENQYA")
 url_subdomain = query_params.get("subdomain", "trf")
 
 SUBDOMAIN = st.sidebar.text_input("Subdomínio", value=url_subdomain)
