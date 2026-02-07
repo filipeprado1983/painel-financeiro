@@ -1,3 +1,7 @@
+# ==========================================
+# DASHBOARD FINANCEIRO - CT-e (ESI)
+# ==========================================
+
 import streamlit as st
 import pandas as pd
 import plotly.express as px
@@ -7,7 +11,9 @@ import requests
 import xml.etree.ElementTree as ET
 import re
 import time
+import numpy as np
 from streamlit_autorefresh import st_autorefresh
+
 
 # ------------------------------------------
 # CONFIGURAÇÃO DA PÁGINA
@@ -18,61 +24,42 @@ st.set_page_config(
     layout="wide"
 )
 
-# AUTO REFRESH: 15 minutos (900000ms)
-st_autorefresh(interval=15 * 60 * 1000, limit=None, key="data_refresh")
+AUTO_REFRESH_SECONDS = 900  # 15 minutos
+
+# Componente de Auto-Refresh (Mantém o painel vivo)
+count = st_autorefresh(interval=AUTO_REFRESH_SECONDS * 1000, key="fancylostcounter")
+
 
 # ------------------------------------------
 # CSS
 # ------------------------------------------
 st.markdown("""
 <style>
-/* Main Background & Fonts */
-.stApp {
-    background-color: #0f172a; /* Slate 900 */
-    font-family: 'Inter', sans-serif;
-}
-
 /* Card do KPI */
 div[data-testid="metric-container"] {
-    background-color: #1e293b; /* Slate 800 */
-    border-radius: 12px;
-    padding: 20px;
-    box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
-    border: 1px solid #334155; /* Slate 700 */
-    transition: transform 0.2s ease;
+    background-color: #ffffff;
+    border-radius: 14px;
+    padding: 16px;
+    box-shadow: 0 4px 12px rgba(0,0,0,0.10);
+    border: 1px solid #e5e7eb;
 }
-
-div[data-testid="metric-container"]:hover {
-    transform: translateY(-2px);
-    border-color: #3b82f6; /* Blue 500 */
-}
-
 /* Texto pequeno (título) */
 div[data-testid="metric-container"] label {
-    color: #94a3b8 !important; /* Slate 400 */
-    font-size: 0.875rem;
-    font-weight: 500;
+    color: #6b7280 !important;
+    font-size: 14px;
+    font-weight: 600;
     text-transform: uppercase;
-    letter-spacing: 0.05em;
 }
-
 /* Texto grande (valor) */
 div[data-testid="metric-container"] div[data-testid="stMetricValue"] {
-    color: #f8fafc !important; /* Slate 50 */
-    font-size: 1.875rem;
-    font-weight: 700;
+    color: #111827 !important;
+    font-size: 26px;
+    font-weight: 800;
 }
-
 /* Delta (Comparação) */
 div[data-testid="metric-container"] div[data-testid="stMetricDelta"] {
     font-weight: 600;
-    font-size: 0.875rem;
-}
-
-/* Adjust Streamlit Elements */
-.stDataFrame {
-    border: 1px solid #334155;
-    border-radius: 8px;
+    font-size: 14px;
 }
 </style>
 """, unsafe_allow_html=True)
@@ -82,25 +69,17 @@ div[data-testid="metric-container"] div[data-testid="stMetricDelta"] {
 # ------------------------------------------
 st.sidebar.header("Configuração")
 
+if "last_auto_refresh" in st.session_state:
+    last_update = datetime.fromtimestamp(st.session_state.last_auto_refresh).strftime('%H:%M')
+    st.sidebar.caption(f"🕒 Atualizado às {last_update}")
+
 if st.sidebar.button("🔄 Forçar Atualização Agora"):
     st.cache_data.clear()
     st.rerun()
 
-# --- PERSISTÊNCIA DE TOKEN VIA URL ---
-# Tenta pegar da URL primeiro
-query_params = st.query_params
-url_token = query_params.get("token", "7f-z3i1jYgura6oQBDKdeDxu2jBMqwAH2jFRjbGd2JJz9CBUWENQYA")
-url_subdomain = query_params.get("subdomain", "trf")
-
-SUBDOMAIN = st.sidebar.text_input("Subdomínio", value=url_subdomain)
-TOKEN = st.sidebar.text_input("Token", type="password", value=url_token)
-DAYS_BACK = st.sidebar.slider("Buscar últimos (dias)", 30, 180, 60)
-
-# Atualiza a URL se os valores mudarem na sidebar (para persistir no F5)
-if TOKEN and TOKEN != url_token:
-    st.query_params["token"] = TOKEN
-if SUBDOMAIN and SUBDOMAIN != url_subdomain:
-    st.query_params["subdomain"] = SUBDOMAIN
+SUBDOMAIN = st.sidebar.text_input("Subdomínio", value="trf")
+TOKEN = st.sidebar.text_input("Token", value="7f-z3i1jYgura6oQBDKdeDxu2jBMqwAH2jFRjbGd2JJz9CBUWENQYA", type="password")
+DAYS_BACK = st.sidebar.slider("Buscar últimos (dias)", 30, 365, 120)
 
 CONNECT_API = st.sidebar.checkbox("Conectar à API", value=True)
 
@@ -140,217 +119,243 @@ def parse_cte_xml(xml_string):
         valor = float(inf.findtext(".//vTPrest", default="0"))
         pagador = inf.findtext(".//rem/xNome", default="Cliente Diverso")
         
-        # Extração da Filial (Emitente)
-        emit = inf.find("emit")
-        filial = "Matriz"
-        if emit is not None:
-            filial = emit.findtext("xFant")
-            if not filial:
-                filial = emit.findtext("xNome")
+        # Extração de Filial (Emitente)
+        xFant = inf.findtext(".//emit/xFant")
+        xNome = inf.findtext(".//emit/xNome")
+        filial = xFant if xFant else (xNome if xNome else "Matriz")
 
-        # Extração de Peso (qCarga) - Lógica de Seleção (Busca Global infQ)
-        peso_final = 0.0
-        pesos_encontrados = {}
-        
-        # Tenta buscar infQ em qualquer lugar do XML (ignora hierarquia infCarga)
-        all_inf_qs = root.findall(".//infQ")
-        
-        if all_inf_qs:
-            # print(f"[DEBUG] CT-e {numero}: Encontrados {len(all_inf_qs)} tags infQ")
-            for inf_q in all_inf_qs:
-                c_unid = inf_q.findtext("cUnid")
-                tp_med = inf_q.findtext("tpMed", default="").upper()
-                q_carga_txt = inf_q.findtext("qCarga", default="0").replace(",", ".")
-
-                try:
-                    val = float(q_carga_txt)
-                except:
-                    val = 0.0
-                
-                # Conversão para KG
-                if c_unid == "02": # TON
-                    val *= 1000
-                
-                # Armazena por tipo
-                key = tp_med if tp_med else f"UNID_{c_unid}"
-                pesos_encontrados[key] = val
-            
-            # Prioridade de Seleção
-            prioridades = ["PESO BRUTO", "P.BRUTO", "PESO REAL", "P.REAL", "PESO", "PESO DECLARADO"]
-            
-            for p in prioridades:
-                for chave_encontrada in pesos_encontrados:
-                    if p in chave_encontrada:
-                        peso_final = pesos_encontrados[chave_encontrada]
-                        break
-                if peso_final > 0:
-                    break
-            
-            # Fallback 1: Unid 01 (KG) mas sem nome de PESO CUBADO
-            if peso_final == 0:
-                for chave, valor in pesos_encontrados.items():
-                    if "CUB" not in chave and "VOL" not in chave and "M3" not in chave:
-                        if valor > peso_final:
-                            peso_final = valor
-            
-            # Fallback 2: Maior valor
-            if peso_final == 0 and pesos_encontrados:
-                peso_final = max(pesos_encontrados.values())
-
-        else:
-             print(f"[DEBUG] CT-e {numero}: Nenhuma tag infQ encontrada no XML inteiro")
+        # Data de Transmissão (Protocolo)
+        prot = root.find(".//protCTe")
+        data_transmissao = None
+        if prot:
+            infProt = prot.find("infProt")
+            if infProt is not None:
+                dh_recbto = infProt.findtext("dhRecbto")
+                if dh_recbto:
+                    dt_trans = pd.to_datetime(dh_recbto, errors="coerce")
+                    if dt_trans is not None:
+                        data_transmissao = dt_trans.replace(tzinfo=None)
 
         return {
             "Numero_CTe": numero,
             "Data_Emissao": data,
+            "Data_Transmissao": data_transmissao,
             "Pagador": pagador,
-            "Valor_Total_Frete": valor,
             "Filial": filial,
-            "Peso_Kg": peso_final
+            "Valor_Total_Frete": valor
         }
-    except Exception as e:
-        print(f"Erro no parse do XML: {e}")
+    except Exception:
         return None
 
 
 # ------------------------------------------
-# FUNÇÃO: BUSCAR DADOS (CACHE 30 MIN)
+# FUNÇÃO: BUSCAR DADOS (INCREMENTAL)
 # ------------------------------------------
+# Removido cache_data para gerenciar manualmente no session_state
+# FUNÇÃO: BUSCAR DADOS (PAGINADO COM CURSOR)
 # ------------------------------------------
-# FUNÇÃO: BUSCAR DADOS DA API (SEM CACHE DE SESSION)
-# ------------------------------------------
-def fetch_ctes_from_api(token, subdomain, since_dt):
+def fetch_batch(token, subdomain, start_param):
+    """
+    Busca UM ou ALGUNS lotes de dados.
+    start_param: pode ser {"since": "..."} ou {"start": "NEXT_ID"}
+    Retorna: (lista_items, proximo_cursor_str ou None)
+    """
     base_url = f"https://{subdomain}.eslcloud.com.br/api/ctes"
     headers = {"Authorization": f"Token {token}"}
     
-    since = since_dt.strftime("%Y-%m-%dT%H:%M:%S.000-03:00")
-    params = {"since": since, "limit": 100}
+    # Adiciona limite padrão
+    params = start_param.copy()
+    params["limit"] = 100 
     
-    all_items = []
-    page = 1
-    MAX_PAGES = 500
-    
-    status_box = st.empty()
-    
-    while page <= MAX_PAGES:
-        if page > 1:
-            time.sleep(0.5) # Reduzido para agilizar
-            
-        status_box.text(f"📥 Baixando novidades... Página {page} ({len(all_items)} novos)")
-        
-        try:
-            r = requests.get(base_url, headers=headers, params=params, timeout=20)
-        except Exception:
-            break
-            
+    try:
+        r = requests.get(base_url, headers=headers, params=params, timeout=15)
         if r.status_code != 200:
-            break
-            
-        try:
-            payload = r.json()
-        except Exception:
-            break
-            
-        items = payload.get("data", [])
-        if not items:
-            break
-            
-        all_items.extend(items)
+            return [], None
+        payload = r.json()
+    except:
+        return [], None
         
-        next_id = payload.get("paging", {}).get("next_id")
-        if not next_id:
-            break
-            
-        # Paginacao via ID
-        params = {"start": next_id, "limit": 100}
-        page += 1
-        
-    status_box.empty()
-    return all_items
+    items = payload.get("data", [])
+    next_id = payload.get("paging", {}).get("next_id")
+    
+    return items, next_id
 
 # ------------------------------------------
-# GERENCIAMENTO DE CACHE LOCAL (PARQUET)
+# GERENCIADOR DE DADOS GLOBAL (Persiste no F5)
 # ------------------------------------------
-CACHE_FILE = "ctes_store.parquet"
-import os
+@st.cache_resource
+class StatsManager:
+    def __init__(self):
+        self.cte_storage = {}
+        self.last_days_back = 0
+        self.last_sync_time = None
+        
+        # Estado de sincronização contínua
+        self.resume_token = None # Se diferente de None, indica que tem mais páginas
+        self.is_syncing = False # Flag visual
+        self.current_params = {} # Armazena os parâmetros da última requisição para continuar
 
-def load_local_data():
-    if os.path.exists(CACHE_FILE):
-        try:
-            return pd.read_parquet(CACHE_FILE)
-        except Exception:
-            return pd.DataFrame()
-    return pd.DataFrame()
+    def get_all(self):
+        return list(self.cte_storage.values())
+        
+    def sync_step(self, token, subdomain, days_back, time_limit=2.0):
+        """
+        Executa passos de sincronização por no máximo `time_limit` segundos.
+        Retorna (novos_items_count, continua_proxima_run?)
+        """
+        fuso_br = timezone(timedelta(hours=-3))
+        agora = datetime.now(fuso_br)
+        start_time = time.time()
+        
+        # 1. Detectar necessidade de Full Reload (Resetar cursor)
+        if days_back > self.last_days_back:
+            # User pediu mais dias, resetamos para buscar tudo desde o novo 'since'
+            self.last_days_back = days_back
+            self.resume_token = None
+            
+            since = (agora - timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%S.000-03:00")
+            self.current_params = {"since": since}
+            
+        elif not self.cte_storage and not self.resume_token:
+             # Cache vazio (primeiro load) e não estamos no meio de uma sync
+            self.last_days_back = days_back
+            self.resume_token = None
+            since = (agora - timedelta(days=days_back)).strftime("%Y-%m-%dT%H:%M:%S.000-03:00")
+            self.current_params = {"since": since}
 
-def save_local_data(df):
-    if not df.empty:
-        # Garante que timestamps sejam salvos corretamente
-        df.to_parquet(CACHE_FILE, index=False)
+        elif self.resume_token is None:
+            # Incremental (só os últimos 7 dias)
+            # Iniciamos um novo ciclo incremental se não houver um em andamento
+            start_date = agora - timedelta(days=7)
+            since = start_date.strftime("%Y-%m-%dT%H:%M:%S.000-03:00")
+            self.current_params = {"since": since}
+        
+        # Se resume_token já tem next_id (continuação), usamos ele
+        if self.resume_token:
+            self.current_params = {"start": self.resume_token}
+            
+        count_new_session = 0
+        has_more = False
+        
+        # Loop pequeno (Time Boxed)
+        while True:
+            # Verifica tempo
+            if (time.time() - start_time) > time_limit:
+                 has_more = True
+                 break
+            
+            items, next_id = fetch_batch(token, subdomain, self.current_params)
+            
+            if not items:
+                # Fim da linha para este batch
+                if not next_id:
+                    self.resume_token = None # Fim total
+                    has_more = False
+                    break
+            
+            # Processar Itens
+            for item in items:
+                try:
+                    cte_data = item.get("cte", item)
+                    item_id = cte_data.get("id") or item.get("id")
+                    
+                    if not item_id:
+                        xml_c = cte_data.get("xml") or cte_data.get("content")
+                        if xml_c:
+                            parsed = parse_cte_xml(xml_c)
+                            if parsed: item_id = parsed.get("Numero_CTe")
+                    
+                    if item_id:
+                        if item_id not in self.cte_storage:
+                            count_new_session += 1
+                        self.cte_storage[item_id] = item
+                    else:
+                        # Hash fallback
+                        xml_c = cte_data.get("xml") or cte_data.get("content")
+                        if xml_c:
+                            h = str(hash(xml_c))
+                            if h not in self.cte_storage: count_new_session += 1
+                            self.cte_storage[h] = item
+                except:
+                    pass
+            
+            # Preparar próxima página
+            if next_id:
+                self.resume_token = next_id
+                self.current_params = {"start": next_id}
+                has_more = True # Tem mais, mas vamos ver se dá tempo de pegar no proximo loop
+            else:
+                self.resume_token = None
+                has_more = False
+                break
+        
+        self.last_sync_time = datetime.now()
+        self.is_syncing = has_more
+        return count_new_session, has_more
+
+@st.cache_resource
+def get_manager():
+    mgr = StatsManager()
+    # Hot-fix: Se o objeto já existia no cache (criado antes da atualização do código),
+    # ele pode não ter os novos atributos. Vamos injetá-los agora.
+    if not hasattr(mgr, "is_syncing"): 
+        mgr.is_syncing = False
+    if not hasattr(mgr, "resume_token"): 
+        mgr.resume_token = None
+    if not hasattr(mgr, "current_params"): 
+        mgr.current_params = {}
+    return mgr
+
 
 # ------------------------------------------
 # DASHBOARD
 # ------------------------------------------
 st.title("🚛 Painel Financeiro em Tempo Real")
 
-# Botão de Reset
-if st.sidebar.button("⚠️ Forçar Ressincronização"):
-    if os.path.exists(CACHE_FILE):
-        os.remove(CACHE_FILE)
-    st.cache_data.clear()
-    st.rerun()
-
 if CONNECT_API and TOKEN:
-    # 1. Carregar Cache Existente
-    df_cache = load_local_data()
+    mgr = get_manager()
     
-    # 2. Definir Ponto de Partida
-    if not df_cache.empty and "Data_Emissao" in df_cache.columns:
-        # Pega a maior data registrada no cache
-        last_date = df_cache["Data_Emissao"].max()
-        # Recua 1 hora por segurança (evitar delay de sincronia)
-        since_fetch = last_date - timedelta(hours=1)
-        # Se o usuário pediu MAIS dias do que temos no cache, forçamos o slider
-        # Mas para "Incremental", geralmente respeitamos o cache e só pegamos o novo.
-        # Se quiser forçar histórico, usa o botão de reset.
-        mode_str = f"Incremental (desde {last_date.strftime('%d/%m %H:%M')})"
-    else:
-        since_fetch = since_dt
-        mode_str = f"Carga Inicial (últimos {DAYS_BACK} dias)"
-        
-    st.sidebar.text(f"Modo: {mode_str}")
+    # 1. RECUPERA DADOS DO CACHE (Instantâneo)
+    items = mgr.get_all()
     
-    # 3. Buscar Novidades
-    new_items = fetch_ctes_from_api(TOKEN, SUBDOMAIN, since_fetch)
+    # Se cache vazio, avisa que vai demorar
+    if not items:
+        st.info("🚀 Iniciando carga inicial de dados... Isso pode levar alguns segundos.")
     
-    # 4. Processar Novos Itens
-    new_records = []
-    for item in new_items:
+    last_sync_txt = mgr.last_sync_time.strftime('%H:%M:%S') if mgr.last_sync_time else "Nunca"
+    st.caption(f"🕒 Última atualização do Cache: {last_sync_txt} (Auto-Refresh ativo)")
+    
+    # Botão de Reset GLOBAL
+    if st.sidebar.button("🗑️ Resetar Tudo (Global)"):
+        st.cache_resource.clear()
+        st.rerun()
+
+    # 2. RENDERIZA DASHBOARD COM O QUE TEM (Para não travar visualização)
+    # (A lógica continua abaixo com a variável 'items')
+    
+    records = []
+    for item in items:
         cte = item.get("cte", item)
         if cte.get("status") in ["canceled", "denied"]:
             continue
+            
         xml = cte.get("xml") or cte.get("content")
         parsed = parse_cte_xml(xml)
         if parsed:
-            new_records.append(parsed)
+            parsed["Status_API"] = cte.get("status", "unknown")
+            records.append(parsed)
             
-    df_new = pd.DataFrame(new_records)
-    
-    # 5. Merge e Deduplicação
-    if not df_new.empty:
-        if not df_cache.empty:
-            # Concatena
-            df_combined = pd.concat([df_cache, df_new], ignore_index=True)
-            # Remove duplicados pelo Numero/Chave (aqui usando Numero_CTe + Pagador/Data para garantir, ou só id se tivesse)
-            # Vamos confiar no Numero_CTe como chave principal 'visível', ou melhor, remover duplicatas exatas
-            df_final = df_combined.drop_duplicates(subset=["Numero_CTe", "Valor_Total_Frete"], keep="last")
+    df = pd.DataFrame(records)
+
+    # --- DIAGNÓSTICO DE STATUS (SIDEBAR) ---
+    with st.sidebar.expander("📊 Diagnóstico de Status (Raw)", expanded=False):
+        if not df.empty and "Status_API" in df.columns:
+            status_counts = df["Status_API"].value_counts().reset_index()
+            status_counts.columns = ["Status", "Qtd"]
+            st.write("Total Carregado:", len(df))
+            st.dataframe(status_counts, hide_index=True)
         else:
-            df_final = df_new
-            
-        # Salva o novo estado
-        save_local_data(df_final)
-        df = df_final
-    else:
-        df = df_cache
+            st.warning("Nenhum dado processado (DataFrame vazio).")
 
 else:
     df = pd.DataFrame()
@@ -363,59 +368,120 @@ if not df.empty:
     
     hoje = agora.date()
     ontem = hoje - timedelta(days=1)
-    anteontem = hoje - timedelta(days=2)
     
     # Datas para comparação (Mês Anterior)
     hoje_mes_passado = hoje - pd.DateOffset(months=1)
+    ontem_mes_passado = ontem - pd.DateOffset(months=1)
     
     # Conversão para data simples para filtro
     hoje_mp_date = hoje_mes_passado.date()
+    ontem_mp_date = ontem_mes_passado.date()
+
+    df = pd.DataFrame(records)
+    
+    # --- SIMULAÇÃO DE CENÁRIOS (DEBUG) ---
+    # Vamos calcular quanto daria se incluíssemos TUDO (cancelados, denegados, etc)
+    # Re-processar lista crua sem filtros
+    all_records = []
+    for item in items:
+        cte = item.get("cte", item)
+        # SEM FILTRO DE STATUS
+        xml = cte.get("xml") or cte.get("content")
+        parsed = parse_cte_xml(xml)
+        if parsed:
+            # Adiciona o status ao objeto para agrupar
+            parsed["Status"] = cte.get("status", "unknown")
+            all_records.append(parsed)
+    
+    df_all = pd.DataFrame(all_records)
+    
+    if not df_all.empty:
+        df_all["Data_Ref"] = df_all["Data_Emissao"].dt.date
+        
+        # Filtro Novembro (Hardcoded para teste rápido ou dinâmico)
+        # User disse "Novembro", então vamos filtrar mês 11/2025 (ou ano atual)
+        # Mas melhor mostrar o GERAL dos dados baixados (que é 60 dias)
+        
+        with st.sidebar.expander("🕵️‍♂️ Comparativo de Status (Simulação)", expanded=True):
+            st.write("Se considerarmos **TODOS** os status:")
+            
+            # Agrupa por Status
+            resumo = df_all.groupby("Status").agg(
+                Qtd=("Numero_CTe", "count"),
+                Valor=("Valor_Total_Frete", "sum")
+            ).reset_index()
+            
+            st.dataframe(resumo.style.format({"Valor": "R$ {:,.2f}"}), hide_index=True)
+            
+            total_qtd = df_all["Numero_CTe"].count()
+            total_val = df_all["Valor_Total_Frete"].sum()
+            
+            st.caption("Compare esses números com o do seu sistema. Se bater, é porque o sistema conta cancelados!")
 
     df["Data_Ref"] = df["Data_Emissao"].dt.date
     
-    # Garantir colunas novas
-    if "Filial" not in df.columns: df["Filial"] = "Não Identificado"
-    else: df["Filial"] = df["Filial"].fillna("Não Identificado")
-        
-    if "Peso_Kg" not in df.columns: df["Peso_Kg"] = 0.0
-    else: df["Peso_Kg"] = df["Peso_Kg"].fillna(0.0)
+    # Lógica de Não Transmitido:
+    # 1. Identificar PENDENTES antes de filtrar o DataFrame principal (para o alerta)
+    df_raw = df.copy()
+    
+    # Identificar "Em Processamento / Não Transmitido" (No Raw)
+    df_raw["Nao_Transmitido"] = (
+        (df_raw["Status_API"] != "authorized") | 
+        (df_raw["Data_Transmissao"].isna())
+    )
+    # Ignorar cancelados no alerta de pendente se o user não quiser ver cancelados pendentes (geralmente não quer)
+    df_pendentes = df_raw[
+        (df_raw["Nao_Transmitido"] == True) & 
+        (~df_raw["Status_API"].isin(["canceled", "denied"]))
+    ]
+
+    # --- FILTRO FINAL: APENAS AUTORIZADOS PARA O FINANCEIRO ---
+    # Convertemos para minúsculo para garantir compatibilidade
+    if "Status_API" in df.columns:
+        df["Status_Normalizado"] = df["Status_API"].astype(str).str.lower().str.strip()
+        df = df[df["Status_Normalizado"] == "authorized"]
+
+    # --- DEDUPLICAÇÃO INTELIGENTE REMOVIDA TEMPORARIAMENTE ---
+    # O filtro por número simples pode ter removido CT-es de Séries diferentes (Ex: Série 1 e 2 com mesmo número).
+    # Vamos confiar no ID único da API que o StatsManager já gerencia.
+    # if not df.empty:
+    #    df = df.drop_duplicates(subset=["Numero_CTe"], keep="last")
+    
+    # Identificar Lag (Atraso na transmissão) em Minutos (Agora só nos autorizados)
+    df["Lag_Minutos"] = (df["Data_Transmissao"] - df["Data_Emissao"]).dt.total_seconds() / 60.0
+    df["Lag_Minutos"] = df["Lag_Minutos"].fillna(0) 
 
     # --- FILTROS DE DADOS ---
     df_hoje = df[df["Data_Ref"] == hoje]
-    df_ontem = df[df["Data_Ref"] == ontem]
-    df_anteontem = df[df["Data_Ref"] == anteontem]
-
-    # Comparativo Mês Anterior (para KPI fechado)
     df_hoje_mp = df[df["Data_Ref"] == hoje_mp_date] 
+
+    df_ontem = df[df["Data_Ref"] == ontem]
+    df_ontem_mp = df[df["Data_Ref"] == ontem_mp_date] # Comparativo
 
     # --- MÉTRICAS E DELTAS ---
     def calc_delta(atual, anterior):
         if anterior == 0: return 0.0
         return ((atual - anterior) / anterior) * 100
 
-    # KPI 1: HOJE (Comparado com ONTEM)
+    # KPI 1: HOJE
     val_hoje = df_hoje["Valor_Total_Frete"].sum()
-    val_ontem = df_ontem["Valor_Total_Frete"].sum()
-    
-    # Logica de Delta: "Hoje vs Ontem"
-    # Se ontem foi 0, o delta seria infinito, retornamos 0 ou 100? calc_delta retorna 0.
-    delta_val_hoje = calc_delta(val_hoje, val_ontem)
+    val_hoje_mp = df_hoje_mp["Valor_Total_Frete"].sum()
+    delta_val_hoje = calc_delta(val_hoje, val_hoje_mp)
     
     qtd_hoje = len(df_hoje)
-    
-    # KPI 2: ONTEM (Comparado com ANTEONTEM)
-    val_anteontem = df_anteontem["Valor_Total_Frete"].sum()
-    delta_val_ontem = calc_delta(val_ontem, val_anteontem)
+    qtd_hoje_mp = len(df_hoje_mp)
+    delta_qtd_hoje = calc_delta(qtd_hoje, qtd_hoje_mp)
 
-    # KPI Peso e Média/Kg (HOJE)
-    peso_hoje = df_hoje["Peso_Kg"].sum()
-    media_kg_hoje = (val_hoje / peso_hoje) if peso_hoje > 0 else 0.0
-    
-    # KPI Peso e Média/Kg (ONTEM)
-    peso_ontem = df_ontem["Peso_Kg"].sum()
-    media_kg_ontem = (val_ontem / peso_ontem) if peso_ontem > 0 else 0.0
+    val_ontem = df_ontem["Valor_Total_Frete"].sum()
+    val_ontem_mp = df_ontem_mp["Valor_Total_Frete"].sum()
+    delta_val_ontem = calc_delta(val_ontem, val_ontem_mp)
 
-    # KPI 3: MÊS ANTERIOR (FECHADO)
+    # KPI 3: MÊS ATUAL (Vigente)
+    mes_atual_start = hoje.replace(day=1)
+    df_mes_atual = df[df["Data_Ref"] >= mes_atual_start]
+    val_mes_atual = df_mes_atual["Valor_Total_Frete"].sum()
+    
+    # KPI 4: MÊS ANTERIOR (FECHADO)
     mes_passado_start = (hoje.replace(day=1) - timedelta(days=1)).replace(day=1)
     mes_passado_end = hoje.replace(day=1) - timedelta(days=1)
     
@@ -424,96 +490,93 @@ if not df.empty:
         (df["Data_Ref"] <= mes_passado_end)
     ]
     val_mes_passado = df_mes_passado["Valor_Total_Frete"].sum()
-    nome_mes_passado = mes_passado_start.strftime("%B/%Y") # Pode precisar de ajuste de locale ou hardcode
+    
+    meses_pt = {1:"Janeiro", 2:"Fevereiro", 3:"Março", 4:"Abril", 5:"Maio", 6:"Junho", 
+                7:"Julho", 8:"Agosto", 9:"Setembro", 10:"Outubro", 11:"Novembro", 12:"Dezembro"}
+    nome_mes_passado = meses_pt.get(mes_passado_start.month, "Mês Anterior")
+    nome_mes_atual = meses_pt.get(mes_atual_start.month, "Mês Atual")
 
-    # KPI 4: ANO ATUAL (YTD)
+    # KPI 5: ANO ATUAL (YTD)
     ano_atual = hoje.year
     df_ano = df[df["Data_Emissao"].dt.year == ano_atual]
     val_ano = df_ano["Valor_Total_Frete"].sum()
 
-    # DISPLAY ROW 1: FINANCEIRO
-    c1, c2, c3, c4 = st.columns(4)
+    # DISPLAY (5 COLUNAS)
+    c1, c2, c3, c4, c5 = st.columns(5)
 
     c1.metric(
         label=f"Hoje ({hoje.strftime('%d/%m')})",
         value=f"R$ {val_hoje:,.2f}",
-        delta=f"{delta_val_hoje:+.1f}% vs Ontem",
+        delta=f"{delta_val_hoje:+.1f}%",
         delta_color="normal"
     )
 
     c2.metric(
         label=f"Ontem ({ontem.strftime('%d/%m')})",
         value=f"R$ {val_ontem:,.2f}",
-        delta=f"{delta_val_ontem:+.1f}% vs Anteontem",
+        delta=f"{delta_val_ontem:+.1f}%",
         delta_color="normal"
     )
     
-    # Ex: Novembro
-    meses_pt = {1:"Janeiro", 2:"Fevereiro", 3:"Março", 4:"Abril", 5:"Maio", 6:"Junho", 
-                7:"Julho", 8:"Agosto", 9:"Setembro", 10:"Outubro", 11:"Novembro", 12:"Dezembro"}
-    nome_mes = meses_pt.get(mes_passado_start.month, "Mês Anterior")
-    
     c3.metric(
-        label=f"{nome_mes} (Fechado)",
+        label=f"{nome_mes_atual} (Em Curso)",
+        value=f"R$ {val_mes_atual:,.2f}",
+        delta=f"{len(df_mes_atual)} CT-es",
+        delta_color="off"
+    )
+    
+    c4.metric(
+        label=f"{nome_mes_passado} (Fechado)",
         value=f"R$ {val_mes_passado:,.2f}",
         delta=f"{len(df_mes_passado)} CT-es",
         delta_color="off"
     )
 
-    c4.metric(
-        label=f"Ano {ano_atual} (Carregado)",
+    # --- AUDITORIA DE DIVERGÊNCIA (MÊS PASSADO) ---
+    # REMOVIDO: Como agora filtramos TUDO para authorized, não deve haver divergência.
+    # Se houver, é porque a API retornou authorized mas o sistema diz outra coisa.
+
+
+    c5.metric(
+        label=f"Ano {ano_atual}",
         value=f"R$ {val_ano:,.2f}",
         delta=f"{len(df_ano)} CT-es",
         delta_color="off"
     )
 
-    # DISPLAY ROW 2: OPERACIONAL (PESO E MÉDIA)
-    try:
-        st.markdown("### ⚖️ Indicadores Operacionais (Hoje)")
-        col_op1, col_op2, col_op3, col_op4 = st.columns(4)
-        
-        # Variação do Peso em relação a ontem (opcional, mas bom ter)
-        delta_peso_hoje = calc_delta(peso_hoje, peso_ontem)
-
-        col_op1.metric(
-            label="Peso Total (Hoje)",
-            value=f"{peso_hoje/1000:,.1f} ton",
-            delta=f"{delta_peso_hoje:+.1f}% vs Ontem",
-            delta_color="normal"
-        )
-
-        col_op2.metric(
-            label="Média Frete / Kg (Hoje)",
-            value=f"R$ {media_kg_hoje:.2f} /kg",
-            help="Cálculo: Total Frete Hoje / Peso Total Hoje",
-            delta=None
-        )
-    except Exception:
-        st.error("Erro ao calcular indicadores operacionais")
-
+    # --- KPI EXTRA: NÃO TRANSMITIDOS ---
+    # --- KPI EXTRA: NÃO TRANSMITIDOS ---
+    st.divider()
+    
+    # Usamos o df_pendentes calculado ANTES do filtro strict
+    qtd_pendente = len(df_pendentes)
+    val_pendente = df_pendentes["Valor_Total_Frete"].sum()
+    
+    if qtd_pendente > 0:
+        st.warning(f"⚠️ **Atenção:** Existem **{qtd_pendente} CT-es** detectados como **Não Transmitidos** (R$ {val_pendente:,.2f}).")
+        with st.expander("Ver CT-es Não Transmitidos"):
+            st.dataframe(
+                df_pendentes[["Numero_CTe", "Data_Emissao", "Status_API", "Valor_Total_Frete"]]
+                .style.format({"Valor_Total_Frete": "R$ {:,.2f}", "Data_Emissao": "{:%d/%m %H:%M}"}),
+                use_container_width=True
+            )
+    
     st.divider()
 
     # ------------------------------------------
     # GRÁFICO COMPARATIVO MELHORADO
     # ------------------------------------------
     # Range strings para o título
-    mes_atual_start = hoje.replace(day=1)
-    nome_mes_atual = meses_pt.get(mes_atual_start.month, mes_atual_start.strftime("%B"))
-    range_atual_str = f"{nome_mes_atual}/{mes_atual_start.year}"
-    
-    # Mês Anterior (Completo)
-    mes_anterior_end = mes_atual_start - timedelta(days=1)
-    mes_anterior_start = mes_anterior_end.replace(day=1)
-    nome_mes_anterior = meses_pt.get(mes_anterior_start.month, mes_anterior_start.strftime("%B"))
-    range_anterior_str = f"{nome_mes_anterior}/{mes_anterior_start.year}"
+    range_atual_str = f"{(hoje - timedelta(days=30)).strftime('%d/%m')} a {hoje.strftime('%d/%m')}"
+    range_anterior_str = f"{(hoje - timedelta(days=60)).strftime('%d/%m')} a {(hoje - timedelta(days=31)).strftime('%d/%m')}"
     
     st.subheader(f"📊 Comparativo Dia a Dia ({range_atual_str} vs {range_anterior_str})")
 
     # Preparar Dados
-    df_atual = df[df["Data_Ref"] >= mes_atual_start].copy()
+    df_atual = df[df["Data_Ref"] >= hoje - timedelta(days=30)].copy()
     df_anterior = df[
-        (df["Data_Ref"] >= mes_anterior_start) & 
-        (df["Data_Ref"] <= mes_anterior_end)
+        (df["Data_Ref"] < hoje - timedelta(days=30)) & 
+        (df["Data_Ref"] >= hoje - timedelta(days=60))
     ].copy()
 
     df_atual["Dia_Mes"] = df_atual["Data_Emissao"].dt.day
@@ -534,7 +597,7 @@ if not df.empty:
         x=grp_anterior["Dia_Mes"], 
         y=grp_anterior["Valor_Total_Frete"],
         name=f"Anterior ({range_anterior_str})",
-        marker_color='#64748b', # Slate 500
+        marker_color='#9ca3af', # Cinza
         hovertemplate=f"Dia %{{x}} ({range_anterior_str})<br><b>R$ %{{y:,.2f}}</b><extra></extra>",
         text=[f"{v/1000:.1f}k" for v in grp_anterior["Valor_Total_Frete"]],
         textposition="outside"
@@ -545,7 +608,7 @@ if not df.empty:
         x=grp_atual["Dia_Mes"], 
         y=grp_atual["Valor_Total_Frete"],
         name=f"Atual ({range_atual_str})",
-        marker_color='#3b82f6', # Blue 500
+        marker_color='#0ea5e9', # Azul
         hovertemplate=f"Dia %{{x}} ({range_atual_str})<br><b>R$ %{{y:,.2f}}</b><extra></extra>",
         text=[f"{v/1000:.1f}k" for v in grp_atual["Valor_Total_Frete"]],
         textposition="outside"
@@ -562,85 +625,221 @@ if not df.empty:
 
     st.plotly_chart(fig, use_container_width=True)
 
-    # ------------------------------------------
-    # FATURAMENTO POR FILIAL (MES ATUAL)
-    # ------------------------------------------
-    st.subheader(f"🏢 Faturamento por Filial ({range_atual_str})")
-    
-    # Agrupar por filial no mês atual
-    grp_filial = df_atual.groupby("Filial")["Valor_Total_Frete"].sum().reset_index()
-    grp_filial = grp_filial.sort_values("Valor_Total_Frete", ascending=True)
 
-    if not grp_filial.empty:
-        fig_filial = px.bar(
-            grp_filial,
-            x="Valor_Total_Frete",
-            y="Filial",
-            orientation='h',
-            text_auto='.2s',
-            color_discrete_sequence=['#10b981'] # Emerald 500
-        )
-        fig_filial.update_traces(
-            textposition="outside",
-            hovertemplate="Filial: %{y}<br>Faturamento: R$ %{x:,.2f}<extra></extra>"
-        )
-        fig_filial.update_layout(
-            xaxis_title="Faturamento (R$)", 
-            yaxis_title="",
-            margin=dict(l=20, r=20, t=20, b=20)
-        )
-        st.plotly_chart(fig_filial, use_container_width=True)
-    else:
-        st.info("Sem dados de filial para o período atual.")
-
-    # ------------------------------------------
-    # EXPORTAÇÃO
-    # ------------------------------------------
-    st.download_button(
-        label="📥 Baixar Dados (CSV)",
-        data=df.to_csv(index=False).encode('utf-8'),
-        file_name=f"financeiro_transp_{hoje}.csv",
-        mime="text/csv",
-        help="Baixar todos os dados carregados em formato CSV"
-    )
 
     # ------------------------------------------
     # DETALHES FINAIS
     # ------------------------------------------
-    c_pie, c_table = st.columns([1, 2])
+    # ------------------------------------------
+    # RANKING DE FILIAIS E CLIENTES
+    # ------------------------------------------
+    # ------------------------------------------
+    # RANKING DE FILIAIS E CLIENTES
+    # ------------------------------------------
+    try:
+        # Debug Temporário
+        # st.write("Colunas disponíveis:", df.columns.tolist())
+        
+        if "Filial" not in df.columns:
+            st.error("Erro: Coluna 'Filial' não encontrada no DataFrame.")
+            # Fallback para criar a coluna se não existir
+            df["Filial"] = "Não Identificada"
+            df_atual["Filial"] = "Não Identificada"
 
-    with c_pie:
-        st.subheader("Top Clientes")
-        top_cli = df.groupby("Pagador")["Valor_Total_Frete"].sum().nlargest(5).reset_index()
-        fig_p = px.pie(
-            top_cli, 
-            values="Valor_Total_Frete", 
-            names="Pagador", 
-            hole=0.6,
-            color_discrete_sequence=px.colors.qualitative.Prism
-        )
-        fig_p.update_traces(
-            textposition='outside', 
-            textinfo='percent+label',
-            textfont=dict(size=14, family="Arial Black"),
-            hovertemplate = "%{label}: R$ %{value:,.2f} (%{percent})"
-        )
-        fig_p.update_layout(
-            showlegend=False,
-            margin=dict(t=40, b=40, l=40, r=40)
-        )
-        st.plotly_chart(fig_p, use_container_width=True)
+        c_filial, c_pie = st.columns(2)
+        
+        with c_filial:
+            st.subheader("🏆 Filiais (Faturamento Mês)")
+            ranking_filial = df_atual.groupby("Filial")["Valor_Total_Frete"].sum().reset_index().sort_values("Valor_Total_Frete", ascending=True)
+            
+            fig_f = px.bar(
+                ranking_filial,
+                x="Valor_Total_Frete",
+                y="Filial",
+                orientation='h',
+                text_auto='.2s',
+                color_discrete_sequence=['#0ea5e9']
+            )
+            fig_f.update_layout(
+                xaxis_title="Faturamento (R$)",
+                yaxis_title=None,
+                margin=dict(l=20, r=20, t=10, b=20)
+            )
+            st.plotly_chart(fig_f, use_container_width=True)
 
-    with c_table:
-        st.subheader("Últimas Emissões (Recentes)")
-        st.dataframe(
-            df.sort_values("Data_Emissao", ascending=False)
-            .head(100)
-            [["Numero_CTe", "Data_Emissao", "Pagador", "Valor_Total_Frete"]]
-            .style.format({"Valor_Total_Frete": "R$ {:,.2f}", "Data_Emissao": "{:%d/%m %H:%M}"}),
-            use_container_width=True,
-            height=400
-        )
+        with c_pie:
+            st.subheader("Top Clientes")
+            top_cli = df.groupby("Pagador")["Valor_Total_Frete"].sum().nlargest(5).reset_index()
+            fig_p = px.pie(
+                top_cli, 
+                values="Valor_Total_Frete", 
+                names="Pagador", 
+                hole=0.5,
+                color_discrete_sequence=px.colors.qualitative.Prism
+            )
+            fig_p.update_traces(
+                textposition='outside', 
+                textinfo='percent+label',
+                textfont=dict(size=14, family="Arial Black"),
+                hovertemplate = "%{label}: R$ %{value:,.2f} (%{percent})"
+            )
+            fig_p.update_layout(
+                showlegend=False,
+                margin=dict(t=40, b=40, l=40, r=40)
+            )
+            st.plotly_chart(fig_p, use_container_width=True)
+            
+    except Exception as e:
+        st.error(f"Ocorreu um erro ao gerar os gráficos de Filial/Cliente: {e}")
 
-else:
-    st.info("Aguardando dados... Verifique o token e clique em conectar.")
+    st.divider()
+
+    # ------------------------------------------
+    # PREVISÃO DE FATURAMENTO (IA Mensal)
+    # ------------------------------------------
+    st.subheader("🔮 Estimativa de Faturamento (Mês Atual)")
+    
+    # Imports
+    import calendar
+    import numpy as np
+    
+    # 1. Preparar dados históricos
+    start_hist = hoje - timedelta(days=60) # Pega pelo menos 2 meses para ver tendencia recente
+    df_hist = df[
+        (df["Data_Ref"] >= start_hist) & 
+        (df["Data_Ref"] <= hoje)
+    ].copy()
+
+    # Debug de condições
+    has_data = len(df_hist) > 10
+    
+    # Permitir projeção mesmo que mês atual seja zero (início de mês), 
+    # desde que haja histórico suficiente para traçar a tendência.
+    if has_data:
+        # Agrupar por dia
+        df_hist["Data_Ref"] = pd.to_datetime(df_hist["Data_Ref"])
+        daily = df_hist.groupby("Data_Ref")["Valor_Total_Frete"].sum().reset_index()
+        daily = daily.sort_values("Data_Ref")
+        
+        # Regressão Linear simples para projetar o final do mês
+        daily["Days_Since"] = (daily["Data_Ref"] - daily["Data_Ref"].min()).dt.days
+        X = daily["Days_Since"].values
+        y = daily["Valor_Total_Frete"].values
+        
+        try:
+            # Fit
+            z = np.polyfit(X, y, 1) 
+            p = np.poly1d(z)
+            
+            # Projetar até o último dia deste mês
+            last_day_month = calendar.monthrange(hoje.year, hoje.month)[1]
+            fim_do_mes = hoje.replace(day=last_day_month)
+            
+            # Dias que faltam no mês
+            dias_restantes = (fim_do_mes - hoje).days
+            
+            if dias_restantes > 0:
+                # Projetar valor médio dos próximos dias baseado na tendência
+                last_x = X[-1]
+                future_days = np.arange(last_x + 1, last_x + dias_restantes + 1)
+                forecast_daily = p(future_days)
+                forecast_daily = [max(0, v) for v in forecast_daily] # Sem valores negativos
+                
+                projecao_restante = sum(forecast_daily)
+                previsao_total_mes = val_mes_atual + projecao_restante
+            else:
+                previsao_total_mes = val_mes_atual
+                
+            # Comparativo com mês passado
+            delta_forecast = 0
+            if val_mes_passado > 0:
+                delta_forecast = ((previsao_total_mes - val_mes_passado) / val_mes_passado) * 100
+                
+            c_proj_1, c_proj_2 = st.columns([3, 1])
+            
+            with c_proj_1:
+                 st.info(f"Com base no ritmo atual, a estimativa para fechar **{nome_mes_atual}** é de aproximadamente **R$ {previsao_total_mes:,.2f}**.")
+                 st.progress(min(1.0, val_mes_atual / previsao_total_mes) if previsao_total_mes > 0 else 0)
+                 st.caption(f"Já realizamos R$ {val_mes_atual:,.2f} ({val_mes_atual/previsao_total_mes:.1%} da previsão).")
+                 
+            with c_proj_2:
+                st.metric(
+                    label="Projeção vs Mês Anterior",
+                    value=f"R$ {previsao_total_mes:,.2f}",
+                    delta=f"{delta_forecast:+.1f}%",
+                    delta_color="normal"
+                )
+        except Exception as e:
+            st.error(f"Erro ao calcular projeção: {e}")
+            
+    else:
+        st.warning(f"Projeção indisponível no momento. (Dados Recentes: {len(df_hist)}, Faturamento Mês: {val_mes_atual:.2f})")
+        st.caption("A IA precisa de pelo menos 5 dias de histórico recente e movimentação no mês atual para projetar.")
+
+    st.divider()
+
+    # ------------------------------------------
+    # TABELA FINAL (FULL WIDTH)
+    # ------------------------------------------
+    st.subheader("📝 Últimas Emissões (Recentes)")
+    st.dataframe(
+        df.sort_values("Data_Emissao", ascending=False)
+        .head(100)
+        [["Numero_CTe", "Data_Emissao", "Pagador", "Valor_Total_Frete", "Filial"]]
+        .style.format({"Valor_Total_Frete": "R$ {:,.2f}", "Data_Emissao": "{:%d/%m %H:%M}"}),
+        use_container_width=True,
+        height=400
+    )
+
+
+# ------------------------------------------
+# MENSAGEM DE ESPERA (CASO DF VAZIO)
+# ------------------------------------------
+if df.empty and CONNECT_API and TOKEN:
+     st.info("⏳ Aguardando sincronização de dados... O painel será atualizado automaticamente.")
+
+# ------------------------------------------
+# SINCRONIZAÇÃO EM BACKGROUND (RESUMABLE / STREAMING)
+# ------------------------------------------
+if CONNECT_API and TOKEN:
+    status_placeholder = st.sidebar.empty()
+    
+    # Se estivermos no meio de uma sincronização (temos token de resumo)
+    # ou se for a primeira vez, mostramos status ativo.
+    if mgr.is_syncing or mgr.resume_token:
+        status_placeholder.text("🔄 Baixando dados...")
+    else:
+        status_placeholder.text("✅ Tudo atualizado.")
+    
+    try:
+        # Executa um passo de sincronização (max 5 segundos para reduzir flash)
+        qtd_novos, has_more = mgr.sync_step(TOKEN, SUBDOMAIN, DAYS_BACK, time_limit=5.0)
+        
+        if qtd_novos > 0:
+            status_placeholder.success(f"Recebidos +{qtd_novos} itens!")
+            # Delay mínimo para o usuário ver que chegou coisa nova antes do refresh
+            time.sleep(0.1)
+            st.rerun()
+            
+        elif has_more:
+            # Não trouxe novos *neste* passo, mas tem mais páginas.
+            # Rerun imediato para buscar o próximo lote sem travar a UI.
+            st.rerun()
+            
+        else:
+            # Terminou tudo.
+            if mgr.is_syncing: 
+                # Terminamos um ciclo grande. Limpamos o status visual.
+                status_placeholder.empty()
+                mgr.is_syncing = False
+            else:
+                # Check silencioso de rotina (já estava tudo ok)
+                status_placeholder.empty()
+            
+    except Exception as e:
+        status_placeholder.error(f"Erro sync: {e}")
+        time.sleep(5) # Backoff em caso de erro grave
+            
+    except Exception as e:
+        status_placeholder.error(f"Erro sync: {e}")
+        time.sleep(5) # Backoff em caso de erro grave
