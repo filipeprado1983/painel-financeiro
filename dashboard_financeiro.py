@@ -503,31 +503,35 @@ if not df.empty:
 
     # DISPLAY (5 COLUNAS)
     c1, c2, c3, c4, c5 = st.columns(5)
+    
+    # Helper rápido para BRL
+    def fmt_brl(val):
+        return f"{val:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
 
     c1.metric(
         label=f"Hoje ({hoje.strftime('%d/%m')})",
-        value=f"R$ {val_hoje:,.2f}",
-        delta=f"{delta_val_hoje:+.1f}%",
+        value=f"R$ {fmt_brl(val_hoje)}",
+        delta=f"{delta_val_hoje:+.1f}%".replace(".", ","),
         delta_color="normal"
     )
 
     c2.metric(
         label=f"Ontem ({ontem.strftime('%d/%m')})",
-        value=f"R$ {val_ontem:,.2f}",
-        delta=f"{delta_val_ontem:+.1f}%",
+        value=f"R$ {fmt_brl(val_ontem)}",
+        delta=f"{delta_val_ontem:+.1f}%".replace(".", ","),
         delta_color="normal"
     )
     
     c3.metric(
         label=f"{nome_mes_atual} (Em Curso)",
-        value=f"R$ {val_mes_atual:,.2f}",
+        value=f"R$ {fmt_brl(val_mes_atual)}",
         delta=f"{len(df_mes_atual)} CT-es",
         delta_color="off"
     )
     
     c4.metric(
         label=f"{nome_mes_passado} (Fechado)",
-        value=f"R$ {val_mes_passado:,.2f}",
+        value=f"R$ {fmt_brl(val_mes_passado)}",
         delta=f"{len(df_mes_passado)} CT-es",
         delta_color="off"
     )
@@ -539,7 +543,7 @@ if not df.empty:
 
     c5.metric(
         label=f"Ano {ano_atual}",
-        value=f"R$ {val_ano:,.2f}",
+        value=f"R$ {fmt_brl(val_ano)}",
         delta=f"{len(df_ano)} CT-es",
         delta_color="off"
     )
