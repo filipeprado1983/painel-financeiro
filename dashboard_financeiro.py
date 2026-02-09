@@ -764,14 +764,19 @@ if not df.empty:
         c_proj_1, c_proj_2 = st.columns([3, 1])
         
         with c_proj_1:
-                st.info(f"Com base no ritmo atual, a estimativa para fechar **{nome_mes_atual}** é de aproximadamente **R$ {previsao_total_mes:,.2f}**.")
+                # Formatação BRL Manual
+                prev_mes_brl = f"{previsao_total_mes:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+                val_atual_brl = f"{val_mes_atual:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
+                
+                st.info(f"Com base no ritmo atual, a estimativa para fechar **{nome_mes_atual}** é de aproximadamente **R$ {prev_mes_brl}**.")
                 st.progress(min(1.0, val_mes_atual / previsao_total_mes) if previsao_total_mes > 0 else 0)
-                st.caption(f"Já realizamos R$ {val_mes_atual:,.2f} ({val_mes_atual/previsao_total_mes:.1%} da previsão).")
+                st.caption(f"Já realizamos R$ {val_atual_brl} ({val_mes_atual/previsao_total_mes:.1%} da previsão).")
                 
         with c_proj_2:
+            prev_mes_brl = f"{previsao_total_mes:,.2f}".replace(",", "_").replace(".", ",").replace("_", ".")
             st.metric(
                 label="Projeção vs Mês Anterior",
-                value=f"R$ {previsao_total_mes:,.2f}",
+                value=f"R$ {prev_mes_brl}",
                 delta=f"{delta_forecast:+.1f}%",
                 delta_color="normal"
             )
