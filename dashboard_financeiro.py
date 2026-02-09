@@ -755,25 +755,26 @@ if not df.empty:
             else:
                 previsao_total_mes = val_mes_atual
                 
-            # Comparativo com mês passado
-            delta_forecast = 0
-            if val_mes_passado > 0:
-                delta_forecast = ((previsao_total_mes - val_mes_passado) / val_mes_passado) * 100
-                
-            c_proj_1, c_proj_2 = st.columns([3, 1])
+        
+        # Comparativo com mês passado
+        delta_forecast = 0
+        if val_mes_passado > 0:
+            delta_forecast = ((previsao_total_mes - val_mes_passado) / val_mes_passado) * 100
             
-            with c_proj_1:
-                 st.info(f"Com base no ritmo atual, a estimativa para fechar **{nome_mes_atual}** é de aproximadamente **R$ {previsao_total_mes:,.2f}**.")
-                 st.progress(min(1.0, val_mes_atual / previsao_total_mes) if previsao_total_mes > 0 else 0)
-                 st.caption(f"Já realizamos R$ {val_mes_atual:,.2f} ({val_mes_atual/previsao_total_mes:.1%} da previsão).")
-                 
-            with c_proj_2:
-                st.metric(
-                    label="Projeção vs Mês Anterior",
-                    value=f"R$ {previsao_total_mes:,.2f}",
-                    delta=f"{delta_forecast:+.1f}%",
-                    delta_color="normal"
-                )
+        c_proj_1, c_proj_2 = st.columns([3, 1])
+        
+        with c_proj_1:
+                st.info(f"Com base no ritmo atual, a estimativa para fechar **{nome_mes_atual}** é de aproximadamente **R$ {previsao_total_mes:,.2f}**.")
+                st.progress(min(1.0, val_mes_atual / previsao_total_mes) if previsao_total_mes > 0 else 0)
+                st.caption(f"Já realizamos R$ {val_mes_atual:,.2f} ({val_mes_atual/previsao_total_mes:.1%} da previsão).")
+                
+        with c_proj_2:
+            st.metric(
+                label="Projeção vs Mês Anterior",
+                value=f"R$ {previsao_total_mes:,.2f}",
+                delta=f"{delta_forecast:+.1f}%",
+                delta_color="normal"
+            )
 
             
     else:
