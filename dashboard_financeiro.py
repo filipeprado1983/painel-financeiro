@@ -567,16 +567,22 @@ if not df.empty:
     # GRÁFICO COMPARATIVO MELHORADO
     # ------------------------------------------
     # Range strings para o título
-    range_atual_str = f"{(hoje - timedelta(days=30)).strftime('%d/%m')} a {hoje.strftime('%d/%m')}"
-    range_anterior_str = f"{(hoje - timedelta(days=60)).strftime('%d/%m')} a {(hoje - timedelta(days=31)).strftime('%d/%m')}"
+    start_atual = hoje.replace(day=1)
+    end_atual = hoje
+    range_atual_str = f"{start_atual.strftime('%d/%m')} a {end_atual.strftime('%d/%m')}"
     
-    st.subheader(f"📊 Comparativo Dia a Dia ({range_atual_str} vs {range_anterior_str})")
+    start_anterior = mes_passado_start
+    end_anterior = mes_passado_end
+    range_anterior_str = f"{start_anterior.strftime('%d/%m')} a {end_anterior.strftime('%d/%m')}"
+    
+    st.subheader(f"📊 Comparativo Dia a Dia ({nome_mes_atual} vs {nome_mes_passado})")
 
-    # Preparar Dados
-    df_atual = df[df["Data_Ref"] >= hoje - timedelta(days=30)].copy()
+    # Preparar Dados (Calendário Civil)
+    df_atual = df[df["Data_Ref"] >= start_atual].copy()
+    
     df_anterior = df[
-        (df["Data_Ref"] < hoje - timedelta(days=30)) & 
-        (df["Data_Ref"] >= hoje - timedelta(days=60))
+        (df["Data_Ref"] >= start_anterior) & 
+        (df["Data_Ref"] <= end_anterior)
     ].copy()
 
     df_atual["Dia_Mes"] = df_atual["Data_Emissao"].dt.day
@@ -596,9 +602,9 @@ if not df.empty:
     fig.add_trace(go.Bar(
         x=grp_anterior["Dia_Mes"], 
         y=grp_anterior["Valor_Total_Frete"],
-        name=f"Anterior ({range_anterior_str})",
+        name=f"Anterior ({nome_mes_passado})",
         marker_color='#9ca3af', # Cinza
-        hovertemplate=f"Dia %{{x}} ({range_anterior_str})<br><b>R$ %{{y:,.2f}}</b><extra></extra>",
+        hovertemplate=f"Dia %{{x}} ({nome_mes_passado})<br><b>R$ %{{y:,.2f}}</b><extra></extra>",
         text=[f"{v/1000:.1f}k" for v in grp_anterior["Valor_Total_Frete"]],
         textposition="outside"
     ))
@@ -607,9 +613,9 @@ if not df.empty:
     fig.add_trace(go.Bar(
         x=grp_atual["Dia_Mes"], 
         y=grp_atual["Valor_Total_Frete"],
-        name=f"Atual ({range_atual_str})",
+        name=f"Atual ({nome_mes_atual})",
         marker_color='#0ea5e9', # Azul
-        hovertemplate=f"Dia %{{x}} ({range_atual_str})<br><b>R$ %{{y:,.2f}}</b><extra></extra>",
+        hovertemplate=f"Dia %{{x}} ({nome_mes_atual})<br><b>R$ %{{y:,.2f}}</b><extra></extra>",
         text=[f"{v/1000:.1f}k" for v in grp_atual["Valor_Total_Frete"]],
         textposition="outside"
     ))
@@ -721,32 +727,31 @@ if not df.empty:
         daily = df_hist.groupby("Data_Ref")["Valor_Total_Frete"].sum().reset_index()
         daily = daily.sort_values("Data_Ref")
         
-        # Regressão Linear simples para projetar o final do mês
-        daily["Days_Since"] = (daily["Data_Ref"] - daily["Data_Ref"].min()).dt.days
-        X = daily["Days_Since"].values
-        y = daily["Valor_Total_Frete"].values
+        # Lógica Ajustada: Média baseada no histórico do Mês Passado
+        # (Substitui regressão linear por projeção baseada na média diária do mês anterior)
         
-        try:
-            # Fit
-            z = np.polyfit(X, y, 1) 
-            p = np.poly1d(z)
+        # Dias no mês passado
+        total_dias_passado = (mes_passado_end - mes_passado_start).days + 1
+        
+        if val_mes_passado > 0 and total_dias_passado > 0:
+            media_diaria_passada = val_mes_passado / total_dias_passado
             
-            # Projetar até o último dia deste mês
+            # Dias restantes no mês atual
             last_day_month = calendar.monthrange(hoje.year, hoje.month)[1]
             fim_do_mes = hoje.replace(day=last_day_month)
-            
-            # Dias que faltam no mês
             dias_restantes = (fim_do_mes - hoje).days
             
             if dias_restantes > 0:
-                # Projetar valor médio dos próximos dias baseado na tendência
-                last_x = X[-1]
-                future_days = np.arange(last_x + 1, last_x + dias_restantes + 1)
-                forecast_daily = p(future_days)
-                forecast_daily = [max(0, v) for v in forecast_daily] # Sem valores negativos
-                
-                projecao_restante = sum(forecast_daily)
-                previsao_total_mes = val_mes_atual + projecao_restante
+                previsao_restante = media_diaria_passada * dias_restantes
+                previsao_total_mes = val_mes_atual + previsao_restante
+            else:
+                previsao_total_mes = val_mes_atual
+        else:
+            # Fallback se não tiver histórico suficiente: usa média atual
+            if hoje.day > 0:
+                media_atual = val_mes_atual / hoje.day
+                last_day_month = calendar.monthrange(hoje.year, hoje.month)[1]
+                previsao_total_mes = media_atual * last_day_month
             else:
                 previsao_total_mes = val_mes_atual
                 
@@ -769,8 +774,7 @@ if not df.empty:
                     delta=f"{delta_forecast:+.1f}%",
                     delta_color="normal"
                 )
-        except Exception as e:
-            st.error(f"Erro ao calcular projeção: {e}")
+
             
     else:
         st.warning(f"Projeção indisponível no momento. (Dados Recentes: {len(df_hist)}, Faturamento Mês: {val_mes_atual:.2f})")
